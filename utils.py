@@ -8,6 +8,8 @@ import torchaudio.transforms as T
 import logging
 from datasets import Dataset
 from transformers import Trainer, TrainingArguments
+import os
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -165,16 +167,20 @@ def compute_metrics(eval_preds):
 
 
 def evaluate_model(model, dataset, tokenizer, split_name, batch_size=1):
-    """Evaluate model on a specific dataset split"""
+    """Evaluate model on a specific dataset split with memory optimization"""
     logger.info(f"Evaluating model on {split_name} set...")
     
+    # Use smaller batch size for evaluation to prevent OOM    
     eval_dataset = Dataset.from_list(dataset)
+    temp_eval_dir = "temp_eval"
     eval_trainer = Trainer(
         model=model,
         args=TrainingArguments(
-            output_dir="temp_eval",
+            output_dir=temp_eval_dir,
             per_device_eval_batch_size=batch_size,
             remove_unused_columns=False,
+            prediction_loss_only=True,  # Only compute loss, don't store predictions
+            dataloader_pin_memory=False,  # Disable pin memory to save GPU memory
         ),
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
@@ -182,6 +188,20 @@ def evaluate_model(model, dataset, tokenizer, split_name, batch_size=1):
         compute_metrics=compute_metrics,
     )
     
-    eval_metrics = eval_trainer.evaluate()
+    # Clear GPU cache before evaluation
+    torch.cuda.empty_cache()
+    
+    # Evaluate with gradient disabled and in no_grad context
+    with torch.no_grad():
+        eval_metrics = eval_trainer.evaluate()
+    
+    # Clear cache after evaluation
+    torch.cuda.empty_cache()
+    
+    # Remove temporary evaluation directory
+    if os.path.exists(temp_eval_dir):
+        shutil.rmtree(temp_eval_dir)
+        logger.info(f"Removed temporary evaluation directory: {temp_eval_dir}")
+    
     logger.info(f"{split_name} metrics: {eval_metrics}")
     return eval_metrics 

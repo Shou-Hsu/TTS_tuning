@@ -1,16 +1,48 @@
+# Core ML dependencies
 torch>=2.0.0
 torchaudio>=2.0.0
 transformers>=4.37.0
 datasets>=2.12.0
+accelerate>=0.20.0
+peft>=0.4.0
+
+# Audio processing
 soundfile>=0.12.1
 librosa>=0.10.0
+scipy>=1.10.0
+
+# Orpheus TTS and SNAC
+orpheus-speech
+snac
+
+# Configuration and utilities
+PyYAML>=6.0.0
 numpy>=1.24.0
 tqdm>=4.65.0
-accelerate>=0.20.0
-pydub>=0.25.1
+pathlib2
+
+# Logging and monitoring
+wandb>=0.15.0
+tensorboard>=2.13.0
+
+# Web framework (for inference API)
 fastapi>=0.68.0
 uvicorn>=0.15.0
-peft>=0.4.0
+python-multipart>=0.0.5
+
+# Helper packages
+einops>=0.7.0
+protobuf>=3.20.0
 pydantic>=1.8.0
-orpheus-tts>=0.1.0
-python-multipart>=0.0.5 
+
+# Development and debugging
+ipython>=8.0.0
+jupyter>=1.0.0
+
+# Audio format support
+wave
+json5>=0.9.0
+
+# Memory and performance optimization
+psutil>=5.9.0
+GPUtil>=1.4.0

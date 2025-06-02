@@ -7,6 +7,7 @@ import logging
 import yaml
 from pathlib import Path
 from datetime import datetime
+from tqdm import tqdm
 
 import torch
 import soundfile as sf
@@ -25,23 +26,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class TTSPipeline:
-    def __init__(self, config_path="simple_config.yaml"):
+    def __init__(self, config_path="configs/training_config.yaml"):
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
             
         self.base_model_name = self.config['model']['base_model']
         self.target_sr = self.config['model']['target_sample_rate']
-        self.device = "cuda:1" if torch.cuda.is_available() else "cpu"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {self.device}")
     
-    def preprocess_data(self, audio_dir, transcript_file, output_dir):
+    def preprocess_data(self, audio_dir, output_dir, transcript_file=None):
         """Step 1: Preprocess audio and text data (supports merging multiple folders)"""
         logger.info("Starting data preprocessing...")
         audio_dir = Path(audio_dir)
         processed_data = {split: [] for split in ['train', 'validation', 'test']}
 
-        # If there are multiple *_processed folders in audio_dir, use merge mode
-        processed_dirs = [d for d in audio_dir.glob("*_processed") if d.is_dir()]
+        # If there are multiple folders with audio_chunks and transcripts, use merge mode
+        processed_dirs = [d for d in audio_dir.iterdir() if d.is_dir() and 
+                         (d / "audio").exists() and (d / "transcripts").exists()]
         if processed_dirs:
             logger.info(f"Detected {len(processed_dirs)} subdirectories, entering merge mode")
             all_audio = []
@@ -61,11 +63,11 @@ class TTSPipeline:
                 else:
                     logger.warning(f"{transcript_path} missing 'transcriptions' field, skipping")
                     continue
-                audio_chunks_dir = dataset_dir / "audio_chunks"
-                if not audio_chunks_dir.exists():
-                    logger.warning(f"{audio_chunks_dir} does not exist, skipping")
+                audio_dir_path = dataset_dir / "audio"
+                if not audio_dir_path.exists():
+                    logger.warning(f"{audio_dir_path} does not exist, skipping")
                     continue
-                for audio_file in audio_chunks_dir.rglob("*.wav"):
+                for audio_file in audio_dir_path.rglob("*.wav"):
                     all_audio.append(str(audio_file))
             if not all_audio:
                 raise ValueError("No audio files found!")
@@ -102,7 +104,9 @@ class TTSPipeline:
                         logger.error(f"Failed to process {audio_path}: {e}")
             logger.info(f"Split results: train={len(processed_data['train'])}, validation={len(processed_data['validation'])}, test={len(processed_data['test'])}")
         else:
-            # Single folder mode, maintaining original behavior
+            # Single folder mode
+            if transcript_file is None:
+                raise ValueError("transcript_file is required in single folder mode")
             # Load transcripts
             with open(transcript_file, 'r', encoding='utf-8') as f:
                 transcripts = json.load(f)
@@ -172,35 +176,59 @@ class TTSPipeline:
         
         processed_datasets = {split: [] for split in ['train', 'validation', 'test']}
         
-        # Process each split
+        # Process each split        
+        total_examples = sum(len(dataset.get(split, [])) for split in processed_datasets.keys())
+        processed_count = 0
+        start_time = datetime.now()
+        
         for split in processed_datasets.keys():
             if split not in dataset:
-                logger.warning(f"{split} split not found in dataset")
+                logger.warning(f"Split {split} not found")
                 continue
                 
             logger.info(f"Processing {split} split...")
-            for i, example in enumerate(dataset[split]):
-                if i % 10 == 0:
-                    logger.info(f"Processing {split} example {i+1}/{len(dataset[split])}")
-                
-                try:
-                    text = example['text']
-                    audio_array = example['audio']['array']
-                    sample_rate = example['audio']['sampling_rate']
-                    
-                    audio_codes = tokenise_audio(audio_array, snac_model, sample_rate)
-                    audio_codes = remove_duplicate_frames(audio_codes)
-                    
-                    processed_example = create_training_example(text, audio_codes, tokenizer)
-                    
-                    if processed_example is not None:
-                        processed_datasets[split].append(processed_example)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing {split} example {i}: {e}")
+            split_examples = dataset[split]
             
-            logger.info(f"Prepared {len(processed_datasets[split])} {split} examples")
+            with tqdm(total=len(split_examples), 
+                     desc=f"Processing {split} split",
+                     unit="samples") as pbar:
+                
+                for i, example in enumerate(split_examples):
+                    try:
+                        text = example['text']
+                        audio_array = example['audio']['array']
+                        sample_rate = example['audio']['sampling_rate']
+                        
+                        audio_codes = tokenise_audio(audio_array, snac_model, sample_rate)
+                        audio_codes = remove_duplicate_frames(audio_codes)
+                        
+                        processed_example = create_training_example(text, audio_codes, tokenizer)
+                        
+                        if processed_example is not None:
+                            processed_datasets[split].append(processed_example)
+                        
+                        processed_count += 1
+                        elapsed_time = (datetime.now() - start_time).total_seconds()
+                        avg_time = elapsed_time / processed_count
+                        remaining_examples = total_examples - processed_count
+                        eta = remaining_examples * avg_time
+                        
+                        pbar.set_postfix({
+                            'Success Rate': f"{len(processed_datasets[split])}/{i+1}",
+                            'Avg Time': f"{avg_time:.2f}s/sample",
+                            'ETA': f"{eta/60:.1f}min"
+                        })
+                        pbar.update(1)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing sample {i} in {split} split: {str(e)}")
+                        pbar.update(1)
+            
+            success_rate = len(processed_datasets[split]) / len(split_examples) * 100
+            logger.info(f"Completed {split} split - Processed {len(processed_datasets[split])}/{len(split_examples)} samples ({success_rate:.1f}%)")
         
+        total_time = (datetime.now() - start_time).total_seconds()
+        logger.info(f"Data processing complete! Processed {processed_count} samples in {total_time/60:.1f} minutes")
         return processed_datasets, tokenizer
 
 
@@ -211,7 +239,14 @@ class TTSPipeline:
         
         if output_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = f"{self.config['output']['model_dir']}_{timestamp}"
+            output_dir = f"models/{self.config['output']['model_dir']}_{timestamp}"
+        else:
+            # Ensure output_dir is within models directory
+            if not output_dir.startswith("models/"):
+                output_dir = f"models/{output_dir}"
+        
+        # Ensure models directory exists
+        os.makedirs("models", exist_ok=True)
         
         # Load dataset
         dataset = DatasetDict.load_from_disk(dataset_path)
@@ -257,13 +292,14 @@ class TTSPipeline:
             logging_steps=self.config['training']['logging_steps'],
             save_steps=self.config['training']['save_steps'],
             eval_steps=self.config['training']['eval_steps'],
-            evaluation_strategy="steps" if processed_datasets['validation'] else "no",
+            eval_strategy="steps" if processed_datasets['validation'] else "no",
             save_total_limit=self.config['training']['save_total_limit'],
             remove_unused_columns=self.config['training']['remove_unused_columns'],
             dataloader_pin_memory=self.config['training']['dataloader_pin_memory'],
             load_best_model_at_end=bool(processed_datasets['validation']),
             metric_for_best_model="eval_loss" if processed_datasets['validation'] else None,
             greater_is_better=False if processed_datasets['validation'] else None,
+            max_grad_norm=self.config['training']['max_grad_norm'],
         )
         
         # Create trainer
@@ -286,17 +322,24 @@ class TTSPipeline:
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         
+        # Clear GPU memory before evaluation
+        torch.cuda.empty_cache()
+        
         # Evaluate on validation and test sets
         evaluation_results = {'train': metrics}
         
         if processed_datasets['validation']:
-            validation_metrics = evaluate_model(model, processed_datasets['validation'], tokenizer, "validation", self.config['training']['batch_size'])
+            # Use smaller batch size for evaluation to prevent OOM
+            eval_batch_size = max(1, self.config['training']['batch_size'] // 4)
+            validation_metrics = evaluate_model(model, processed_datasets['validation'], tokenizer, "validation", eval_batch_size)
             trainer.log_metrics("validation", validation_metrics)
             trainer.save_metrics("validation", validation_metrics)
             evaluation_results['validation'] = validation_metrics
         
         if processed_datasets['test']:
-            test_metrics = evaluate_model(model, processed_datasets['test'], tokenizer, "test", self.config['training']['batch_size'])
+            # Use smaller batch size for evaluation to prevent OOM
+            eval_batch_size = max(1, self.config['training']['batch_size'] // 4)
+            test_metrics = evaluate_model(model, processed_datasets['test'], tokenizer, "test", eval_batch_size)
             trainer.log_metrics("test", test_metrics)
             trainer.save_metrics("test", test_metrics)
             evaluation_results['test'] = test_metrics
@@ -403,7 +446,7 @@ def main():
             print("Error: --audio_dir required for preprocessing")
             return
         # Merge mode: transcript_file can be None
-        pipeline.preprocess_data(args.audio_dir, args.transcript_file, args.dataset_output)
+        pipeline.preprocess_data(args.audio_dir, args.dataset_output, args.transcript_file)
     
     elif args.stage == "train":
         if not args.dataset_path:
