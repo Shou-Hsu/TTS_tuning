@@ -1,0 +1,73 @@
+# Simple TTS Pipeline Configuration
+# ===================================
+
+# Model settings
+model:
+  base_model: "canopylabs/orpheus-tts-0.1-pretrained"
+  target_sample_rate: 24000
+  dtype: "bfloat16"
+  device_map: "auto"
+  trust_remote_code: true
+
+# Training settings
+training:
+  epochs: 500
+  batch_size: 1
+  gradient_accumulation_steps: 32
+  learning_rate: 0.00002
+  warmup_steps: 500
+  fp16: true
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 3
+  remove_unused_columns: false
+  dataloader_pin_memory: false
+  
+  # LoRA settings
+  lora_r: 32
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+  # Add gradient clipping
+  max_grad_norm: 1.0
+
+# Data settings
+data:
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  max_audio_length: 30  # seconds
+  min_audio_length: 1   # seconds
+  seed: 42  # for dataset shuffling
+
+# Generation settings
+generation:
+  temperature: 0.88    # Lower temperature for more stable generation
+  top_p: 0.92        # Slightly reduced to filter low probability options
+  repetition_penalty: 1.1  # Increased to reduce repetition
+  max_tokens: 2048    # Reduced to ensure generation quality
+  speed_factor: 0.85
+  min_pause_duration: 0.2
+  pause_token_weight: 1.15
+
+# Audio settings
+audio:
+  channels: 1
+  sample_width: 2
+  sample_rate: 24000
+  format: "wav"
+
+# Output settings
+output:
+  model_dir: "finetuned_model"
+  dataset_dir: "processed_dataset"
+  audio_format: "wav"
+  sample_rate: 24000
+
+# SNAC model settings
+snac:
+  model_name: "hubertsiuzdak/snac_24khz"
