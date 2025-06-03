@@ -1,8 +1,3 @@
-"""
-Shared audio processing utilities for TTS training.
-Contains common functions used by both train.py and train_elon_specific.py.
-"""
-
 import torch
 import torchaudio.transforms as T
 import logging

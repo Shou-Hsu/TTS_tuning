@@ -12,7 +12,7 @@ from tqdm import tqdm
 import torch
 import soundfile as sf
 from datasets import Dataset, Features, Audio, Value, DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model
 from orpheus_tts import OrpheusModel
 from snac import SNAC
@@ -43,7 +43,7 @@ class TTSPipeline:
 
         # If there are multiple folders with audio_chunks and transcripts, use merge mode
         processed_dirs = [d for d in audio_dir.iterdir() if d.is_dir() and 
-                         (d / "audio").exists() and (d / "transcripts").exists()]
+                        (d / "audio").exists() and (d / "transcripts").exists()]
         if processed_dirs:
             logger.info(f"Detected {len(processed_dirs)} subdirectories, entering merge mode")
             all_audio = []
@@ -190,8 +190,8 @@ class TTSPipeline:
             split_examples = dataset[split]
             
             with tqdm(total=len(split_examples), 
-                     desc=f"Processing {split} split",
-                     unit="samples") as pbar:
+                    desc=f"Processing {split} split",
+                    unit="samples") as pbar:
                 
                 for i, example in enumerate(split_examples):
                     try:
@@ -229,13 +229,23 @@ class TTSPipeline:
         
         total_time = (datetime.now() - start_time).total_seconds()
         logger.info(f"Data processing complete! Processed {processed_count} samples in {total_time/60:.1f} minutes")
+        
+        # Clear GPU memory after data preparation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         return processed_datasets, tokenizer
-
-
 
     def train_model(self, dataset_path, output_dir=None):
         """Step 2: Fine-tune the model with LoRA"""
         logger.info("Starting model training...")
+        
+        # Set memory optimization environment variables
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+        
+        # Clear GPU memory at start
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         if output_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -266,6 +276,9 @@ class TTSPipeline:
             trust_remote_code=self.config['model']['trust_remote_code']
         )
         
+        # Debug: Print available module names
+        logger.info("Available modules in the model:")
+        
         # Setup LoRA
         lora_config = LoraConfig(
             r=self.config['training']['lora_r'],
@@ -279,15 +292,26 @@ class TTSPipeline:
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
         
+        # Verify that there are trainable parameters
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"Total trainable parameters: {trainable_params:,}")
+        
+        if trainable_params == 0:
+            raise ValueError("No trainable parameters found! Check LoRA configuration.")
+        
+        # Make sure the model is in training mode
+        model.train()
+        
         # Training arguments
         training_args = TrainingArguments(
             output_dir=output_dir,
             num_train_epochs=self.config['training']['epochs'],
             per_device_train_batch_size=self.config['training']['batch_size'],
-            per_device_eval_batch_size=self.config['training']['batch_size'],
+            per_device_eval_batch_size=max(1, self.config['training']['batch_size'] // 2),  # Use smaller eval batch size
             gradient_accumulation_steps=self.config['training']['gradient_accumulation_steps'],
             warmup_steps=self.config['training']['warmup_steps'],
             learning_rate=self.config['training']['learning_rate'],
+            weight_decay=self.config['training'].get('weight_decay', 0.0),
             fp16=self.config['training']['fp16'],
             logging_steps=self.config['training']['logging_steps'],
             save_steps=self.config['training']['save_steps'],
@@ -300,8 +324,27 @@ class TTSPipeline:
             metric_for_best_model="eval_loss" if processed_datasets['validation'] else None,
             greater_is_better=False if processed_datasets['validation'] else None,
             max_grad_norm=self.config['training']['max_grad_norm'],
+            # Memory optimization settings from config
+            prediction_loss_only=True,  # Only compute loss, don't store predictions
+            eval_accumulation_steps=self.config['training'].get('eval_accumulation_steps', 4),
+            skip_memory_metrics=self.config['training'].get('skip_memory_metrics', True),
+            gradient_checkpointing=False,  # Disable to avoid gradient issues temporarily
+            dataloader_num_workers=self.config['training'].get('dataloader_num_workers', 0),
+            # Wandb settings from config
+            report_to=self.config['training'].get('report_to', []),
+            run_name=self.config['training'].get('wandb_run_name', None),
         )
         
+        # Prepare callbacks
+        callbacks = []
+        if processed_datasets['validation'] and self.config['training'].get('early_stopping_patience'):
+            early_stopping_callback = EarlyStoppingCallback(
+                early_stopping_patience=self.config['training'].get('early_stopping_patience', 3),
+                early_stopping_threshold=self.config['training'].get('early_stopping_threshold', 0.01)
+            )
+            callbacks.append(early_stopping_callback)
+            logger.info(f"Early stopping enabled with patience={self.config['training'].get('early_stopping_patience', 3)}")
+
         # Create trainer
         trainer = Trainer(
             model=model,
@@ -310,8 +353,20 @@ class TTSPipeline:
             eval_dataset=Dataset.from_list(processed_datasets['validation']) if processed_datasets['validation'] else None,
             tokenizer=tokenizer,
             data_collator=lambda features: custom_data_collator(features, tokenizer),
-            compute_metrics=compute_metrics if processed_datasets['validation'] else None,
+            compute_metrics=None,  # Disable compute_metrics to save memory
+            callbacks=callbacks,  # Add callbacks including early stopping
         )
+        
+        # Log training configuration
+        logger.info("Training configuration:")
+        logger.info(f"  Learning rate: {self.config['training']['learning_rate']}")
+        logger.info(f"  Weight decay: {self.config['training'].get('weight_decay', 0.0)}")
+        logger.info(f"  Max grad norm: {self.config['training']['max_grad_norm']}")
+        logger.info(f"  LoRA dropout: {self.config['training']['lora_dropout']}")
+        logger.info(f"  Epochs: {self.config['training']['epochs']}")
+        if processed_datasets['validation'] and self.config['training'].get('early_stopping_patience'):
+            logger.info(f"  Early stopping patience: {self.config['training'].get('early_stopping_patience')}")
+            logger.info(f"  Early stopping threshold: {self.config['training'].get('early_stopping_threshold')}")
         
         # Train
         logger.info("Starting training...")
@@ -348,26 +403,86 @@ class TTSPipeline:
         trainer.save_model()
         tokenizer.save_pretrained(output_dir)
         
-        # Merge and save the final model
-        logger.info("Merging LoRA adapters...")
-        merged_model = model.merge_and_unload()
-        merged_output_dir = f"{output_dir}_merged"
-        merged_model.save_pretrained(merged_output_dir)
-        tokenizer.save_pretrained(merged_output_dir)
+        # Remove the automatic merging section and replace with just logging
+        logger.info(f"Training completed! LoRA model saved to {output_dir}")
+        logger.info("Use --stage merge to merge LoRA adapters with base model")
         
         # Save evaluation results
         with open(os.path.join(output_dir, 'evaluation_results.json'), 'w') as f:
             json.dump(evaluation_results, f, indent=2)
         
-        logger.info(f"Training completed! Model saved to {output_dir}")
-        logger.info(f"Merged model saved to {merged_output_dir}")
         logger.info("Final evaluation results:")
         for split, metrics in evaluation_results.items():
             if metrics:
                 logger.info(f"{split.capitalize()}: {metrics}")
         
-        return merged_output_dir
+        return output_dir
     
+    def merge_lora_model(self, lora_model_path, output_dir=None):
+        """Step 2.5: Merge LoRA adapters with base model
+        
+        This stage merges LoRA adapters trained during the training stage back into the base model,
+        creating a single unified model that can be used for inference without requiring LoRA adapters.
+        
+        Args:
+            lora_model_path (str): Path to the directory containing the trained LoRA model
+            output_dir (str, optional): Output directory for the merged model. If None, 
+                                      will use {lora_model_path}_merged
+        
+        Returns:
+            str: Path to the merged model directory
+            
+        Usage:
+            python tts_pipeline.py --stage merge --lora_model_path models/my_lora_model --merged_output models/my_merged_model
+        """
+        logger.info("Starting LoRA model merging...")
+        
+        if output_dir is None:
+            output_dir = f"{lora_model_path}_merged"
+        else:
+            # Ensure output_dir is within models directory
+            if not output_dir.startswith("models/"):
+                output_dir = f"models/{output_dir}"
+        
+        # Ensure models directory exists
+        os.makedirs("models", exist_ok=True)
+        
+        # Load LoRA model
+        logger.info(f"Loading LoRA model from {lora_model_path}")
+        model = AutoModelForCausalLM.from_pretrained(
+            lora_model_path,
+            torch_dtype=getattr(torch, self.config['model']['dtype']),
+            device_map=self.config['model']['device_map'],
+            trust_remote_code=self.config['model']['trust_remote_code']
+        )
+        
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(lora_model_path)
+        
+        # Merge LoRA adapters
+        logger.info("Merging LoRA adapters with base model...")
+        merged_model = model.merge_and_unload()
+        
+        # Save merged model
+        logger.info(f"Saving merged model to {output_dir}")
+        merged_model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        
+        # Copy evaluation results if they exist
+        eval_results_path = os.path.join(lora_model_path, 'evaluation_results.json')
+        if os.path.exists(eval_results_path):
+            import shutil
+            shutil.copy2(eval_results_path, os.path.join(output_dir, 'evaluation_results.json'))
+            logger.info("Copied evaluation results to merged model directory")
+        
+        logger.info(f"LoRA merging completed! Merged model saved to {output_dir}")
+        
+        # Clear GPU memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return output_dir
+
     def test_inference(self, model_path, prompt, output_file=None):
         """Step 3: Test model inference"""
         logger.info("Testing model inference...")
@@ -387,13 +502,21 @@ class TTSPipeline:
         logger.info(f"Generating speech for: {prompt[:100]}...")
         start_time = time.time()
         
-        syn_tokens = model.generate_speech(
-            prompt=prompt,
-            temperature=self.config['generation']['temperature'],
-            top_p=self.config['generation']['top_p'],
-            repetition_penalty=self.config['generation']['repetition_penalty'],
-            max_tokens=self.config['generation']['max_tokens']
-        )
+        # Prepare generation parameters - only include supported parameters
+        generation_params = {
+            'prompt': prompt,
+            'temperature': self.config['generation']['temperature'],
+            'top_p': self.config['generation']['top_p'],
+            'repetition_penalty': self.config['generation']['repetition_penalty'],
+            'max_tokens': self.config['generation']['max_tokens']
+        }
+        
+        logger.info(f"Generation parameters: {generation_params}")
+        
+        # Note: OrpheusModel doesn't support speed_factor, min_pause_duration, pause_token_weight
+        # These parameters are removed to avoid the TypeError
+        
+        syn_tokens = model.generate_speech(**generation_params)
         
         # Save audio
         with wave.open(output_file, "wb") as wf:
@@ -418,19 +541,23 @@ class TTSPipeline:
         return output_file, duration, generation_time
 
 def main():
-    parser = argparse.ArgumentParser(description="Complete TTS Pipeline: Preprocessing, Training, and Inference")
-    parser.add_argument("--stage", choices=["preprocess", "train", "inference"], 
-                       required=True, help="Pipeline stage to run")
+    parser = argparse.ArgumentParser(description="Complete TTS Pipeline: Preprocessing, Training, Inference, and Merging")
+    parser.add_argument("--stage", choices=["preprocess", "train", "merge", "inference"], 
+                    required=True, help="Pipeline stage to run")
     
     # Preprocessing arguments
     parser.add_argument("--audio_dir", help="Directory containing audio files")
     parser.add_argument("--transcript_file", help="JSON file with transcripts")
     parser.add_argument("--dataset_output", default="processed_dataset", 
-                       help="Output directory for processed dataset")
+                    help="Output directory for processed dataset")
     
     # Training arguments
     parser.add_argument("--dataset_path", help="Path to processed dataset")
     parser.add_argument("--model_output", help="Output directory for trained model")
+    
+    # Merging arguments
+    parser.add_argument("--lora_model_path", help="Path to LoRA model for merging")
+    parser.add_argument("--merged_output", help="Output directory for merged model")
     
     # Inference arguments
     parser.add_argument("--model_path", help="Path to trained model")
@@ -453,6 +580,13 @@ def main():
             print("Error: --dataset_path required for training")
             return
         pipeline.train_model(args.dataset_path, args.model_output)
+    
+    elif args.stage == "merge":
+        lora_path = args.lora_model_path or args.model_path
+        if not lora_path:
+            print("Error: --lora_model_path or --model_path required for merging")
+            return
+        pipeline.merge_lora_model(lora_path, args.merged_output)
     
     elif args.stage == "inference":
         if not args.model_path or not args.prompt:

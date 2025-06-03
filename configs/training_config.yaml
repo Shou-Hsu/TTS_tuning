@@ -7,53 +7,50 @@ model:
 
 # Training settings
 training:
-  epochs: 5
+  epochs: 80
   batch_size: 2
-  gradient_accumulation_steps: 32
-  learning_rate: 0.00001
-  warmup_steps: 100
+  gradient_accumulation_steps: 8
+  learning_rate: 0.00005
+  warmup_steps: 200
   fp16: true
-  logging_steps: 10
-  save_steps: 400
+  logging_steps: 5
+  save_steps: 200
   eval_steps: 200
-  save_total_limit: 3
+  save_total_limit: 20
   remove_unused_columns: false
   dataloader_pin_memory: false
+  weight_decay: 0.01
+  early_stopping_patience: 5
+  early_stopping_threshold: 0.01
   
-  # LoRA settings
-  lora_r: 64
-  lora_alpha: 32
-  lora_dropout: 0.1
-  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
-  bias: "none"
+  # Memory optimization settings
+  gradient_checkpointing: false
+  dataloader_num_workers: 0
+  eval_accumulation_steps: 2
+  skip_memory_metrics: true
+  
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.15 
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  bias: "lora_only"
   task_type: "CAUSAL_LM"
 
-  # Add gradient clipping
-  max_grad_norm: 0.3
+  # Adjusted gradient clipping to accommodate actual gradient norms
+  max_grad_norm: 2.5
 
   # Wandb settings
   report_to: ["wandb"]
   wandb_project: "tts-finetune"
   wandb_run_name: "orpheus-tts-finetune"
 
-# Data settings
-data:
-  train_split: 0.8
-  val_split: 0.1
-  test_split: 0.1
-  max_audio_length: 30
-  min_audio_length: 1
-  seed: 42
 
 # Generation settings
 generation:
-  temperature: 0.7
-  top_p: 0.85
-  repetition_penalty: 1.2
+  temperature: 0.6
+  top_p: 0.9
+  repetition_penalty: 1.35
   max_tokens: 1024
-  speed_factor: 0.9
-  min_pause_duration: 0.15
-  pause_token_weight: 1.1
 
 # Audio settings
 audio:
