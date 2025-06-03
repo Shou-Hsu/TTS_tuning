@@ -39,26 +39,26 @@ pip install -r requirements.txt
 
 ### 2. Prepare Data
 ```bash
-# Example commands (implement your own scripts):
-python scripts/dataset_processor.py --input_dir data/raw_data --output_dir data/processed_data
+# Preprocess audio and text data (supports merging multiple folders)
+python tts_pipeline.py --stage preprocess --audio_dir data/raw_data --dataset_output data/processed_dataset
 ```
 
-### 3. Merge Data
+### 3. Fine-tune Model
 ```bash
-# Merge processed data into training dataset
-python scripts/merge_dataset.py --input_dir data/processed_data --output_dir data/merged_data --config configs/merge_config.yaml
+# Train the model with LoRA
+python tts_pipeline.py --stage train --dataset_path data/processed_dataset --model_output models/finetuned_model
 ```
 
-### 4. Fine-tune Model
+### 4. Merge LoRA Model
 ```bash
-# Example training command (adapt to your setup):
-python tts_pipeline.py --stage train --dataset_path ./data/processed_dataset
+# Merge LoRA adapters with base model
+python tts_pipeline.py --stage merge --lora_model_path models/finetuned_model --merged_output models/merged_model
 ```
 
 ### 5. Generate Speech
 ```bash
-# Example inference command (implement your own pipeline):
-python tts_pipeline.py --stage inference --model_path models/finetuned_model--prompt "This is not just voice synthesis — it is signal extraction. We began with raw, noisy audio from real-world conversations, meetings, and phone calls, and fine-tuned it into a voice that is clear, responsive, and context-aware." --audio_output generated_audio.wav
+# Generate speech using trained model
+python tts_pipeline.py --stage inference --model_path models/merged_model --prompt "This is not just voice synthesis — it is signal extraction. We began with raw, noisy audio from real-world conversations, meetings, and phone calls, and fine-tuned it into a voice that is clear, responsive, and context-aware." --audio_output generated_audio.wav
 ```
 
 ## 📋 Features
