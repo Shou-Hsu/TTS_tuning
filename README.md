@@ -43,13 +43,19 @@ pip install -r requirements.txt
 python scripts/dataset_processor.py --input_dir data/raw_data --output_dir data/processed_data
 ```
 
-### 3. Fine-tune Model
+### 3. Merge Data
+```bash
+# Merge processed data into training dataset
+python scripts/merge_dataset.py --input_dir data/processed_data --output_dir data/merged_data --config configs/merge_config.yaml
+```
+
+### 4. Fine-tune Model
 ```bash
 # Example training command (adapt to your setup):
 python tts_pipeline.py --stage train --dataset_path ./data/processed_dataset
 ```
 
-### 4. Generate Speech
+### 5. Generate Speech
 ```bash
 # Example inference command (implement your own pipeline):
 python tts_pipeline.py --stage inference --model_path models/finetuned_model--prompt "This is not just voice synthesis — it is signal extraction. We began with raw, noisy audio from real-world conversations, meetings, and phone calls, and fine-tuned it into a voice that is clear, responsive, and context-aware." --audio_output generated_audio.wav

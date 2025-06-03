@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 from datasets import Dataset, Features, Audio, Value, DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, EarlyStoppingCallback
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, PeftModel
 from orpheus_tts import OrpheusModel
 from snac import SNAC
 
@@ -43,7 +43,7 @@ class TTSPipeline:
 
         # If there are multiple folders with audio_chunks and transcripts, use merge mode
         processed_dirs = [d for d in audio_dir.iterdir() if d.is_dir() and 
-                        (d / "audio").exists() and (d / "transcripts").exists()]
+                         (d / "audio").exists() and (d / "transcripts").exists()]
         if processed_dirs:
             logger.info(f"Detected {len(processed_dirs)} subdirectories, entering merge mode")
             all_audio = []
@@ -190,8 +190,8 @@ class TTSPipeline:
             split_examples = dataset[split]
             
             with tqdm(total=len(split_examples), 
-                    desc=f"Processing {split} split",
-                    unit="samples") as pbar:
+                     desc=f"Processing {split} split",
+                     unit="samples") as pbar:
                 
                 for i, example in enumerate(split_examples):
                     try:
@@ -419,22 +419,7 @@ class TTSPipeline:
         return output_dir
     
     def merge_lora_model(self, lora_model_path, output_dir=None):
-        """Step 2.5: Merge LoRA adapters with base model
-        
-        This stage merges LoRA adapters trained during the training stage back into the base model,
-        creating a single unified model that can be used for inference without requiring LoRA adapters.
-        
-        Args:
-            lora_model_path (str): Path to the directory containing the trained LoRA model
-            output_dir (str, optional): Output directory for the merged model. If None, 
-                                      will use {lora_model_path}_merged
-        
-        Returns:
-            str: Path to the merged model directory
-            
-        Usage:
-            python tts_pipeline.py --stage merge --lora_model_path models/my_lora_model --merged_output models/my_merged_model
-        """
+        """Step 2.5: Merge LoRA adapters with base model"""
         logger.info("Starting LoRA model merging...")
         
         if output_dir is None:
@@ -447,14 +432,15 @@ class TTSPipeline:
         # Ensure models directory exists
         os.makedirs("models", exist_ok=True)
         
-        # Load LoRA model
+        # Load LoRA model with PEFT
         logger.info(f"Loading LoRA model from {lora_model_path}")
         model = AutoModelForCausalLM.from_pretrained(
-            lora_model_path,
+            self.base_model_name,
             torch_dtype=getattr(torch, self.config['model']['dtype']),
             device_map=self.config['model']['device_map'],
             trust_remote_code=self.config['model']['trust_remote_code']
         )
+        model = PeftModel.from_pretrained(model, lora_model_path)
         
         # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(lora_model_path)
@@ -543,13 +529,13 @@ class TTSPipeline:
 def main():
     parser = argparse.ArgumentParser(description="Complete TTS Pipeline: Preprocessing, Training, Inference, and Merging")
     parser.add_argument("--stage", choices=["preprocess", "train", "merge", "inference"], 
-                    required=True, help="Pipeline stage to run")
+                       required=True, help="Pipeline stage to run")
     
     # Preprocessing arguments
     parser.add_argument("--audio_dir", help="Directory containing audio files")
     parser.add_argument("--transcript_file", help="JSON file with transcripts")
     parser.add_argument("--dataset_output", default="processed_dataset", 
-                    help="Output directory for processed dataset")
+                       help="Output directory for processed dataset")
     
     # Training arguments
     parser.add_argument("--dataset_path", help="Path to processed dataset")
